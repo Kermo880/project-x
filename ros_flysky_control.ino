@@ -91,8 +91,8 @@ void cmd_vel_callback(const geometry_msgs::Twist& cmd_vel_msg) {
   float angular_velocity = cmd_vel_msg.angular.z;
 
   // Calculate motor speeds based on linear and angular velocities
-  int pwmValue = 0;  // Placeholder for motor 1
-  int pwmValue1 = 0; // Placeholder for motor 2
+  int pwmValue = 0;
+  int pwmValue1 = 0;
 
   if (linear_velocity > 0.0) {
     // Forward motion
