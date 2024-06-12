@@ -1,17 +1,23 @@
 #include <IBusBM.h>
 #include <ros.h>
 #include <geometry_msgs/Twist.h>
+#include <sensor_msgs/NavSatFix.h>
+#include <nav_msgs/Path.h>
 
 IBusBM ibus;
 ros::NodeHandle nh;
 
-const int motorPin = 7;
-const int motorPin2 = 6;
-const int stby = 6;
+const int motorPin = 6;
+const int motorPin2 = 7;
+const int filterRes = 1000;
+const int filterCap = 100;
 
-void cmd_vel_callback(const geometry_msgs::Twist& cmd_vel_msg);
+float robot_x, robot_y;
+
+void cmd_vel_callback(const geometry_msgs::Twist& cmd_vel_msg); // Function declaration (remove duplicate)
 ros::Subscriber<geometry_msgs::Twist> cmd_vel_sub("/cmd_vel", &cmd_vel_callback);
 
+// Function to read RC channel with error handling
 int readChannel(byte channelInput, int minLimit, int maxLimit, int defaultValue) {
   uint16_t ch = ibus.readChannel(channelInput);
   if (ch < 100) return defaultValue;
@@ -30,8 +36,10 @@ void setup() {
   ibus.begin(Serial1);
   pinMode(motorPin, OUTPUT);
   pinMode(motorPin2, OUTPUT);
-  pinMode(stby, OUTPUT);
-  digitalWrite(stby, HIGH);
+  digitalWrite(6, HIGH);
+  digitalWrite(7, HIGH);
+  pinMode(filterCap, OUTPUT);
+  digitalWrite(filterCap, LOW);
 
   nh.initNode();
   nh.subscribe(cmd_vel_sub);
@@ -40,79 +48,54 @@ void setup() {
 void loop() {
   int rcCH5 = readSwitch(4, false);
 
-  if(rcCH5 == true){
+  if (rcCH5 == true) {
+    digitalWrite(filterCap, HIGH);
+    delayMicroseconds(filterRes * filterCap / 1000000.0);
+    digitalWrite(filterCap, LOW);
     remoteControl();
   } else {
     nh.spinOnce();
   }
 }
 
-void remoteControl(){
-  int rcCH1 = readChannel(0, -100, 100, 0);
-  int rcCH3 = readChannel(2, 105, 250, 0);
-  int rcCH6 = readSwitch(5, false);
+void remoteControl() {
+  // Read the values from RC channels 1, 3, and 6
+  int rcCH1 = readChannel(0, -100, 100, 0);  // Steering adjustment
+  int rcCH3 = readChannel(2, 100, 250, 175);  // Motor 1 speed
+  int rcCH6 = readSwitch(5, false);       // ROS/Remote switch
 
-  int pwmValue = rcCH3;
-  int pwmValue1 = rcCH3;
-  if (rcCH3 >= 180 && rcCH6 == true && rcCH1 >= 10) {
-    // Right motion
-    pwmValue = map(rcCH3, 175, 105, 180, 250);
-    pwmValue1 = rcCH3;
-    analogWrite(motorPin, pwmValue);
-    analogWrite(motorPin2, pwmValue1);
-  } else if (rcCH3 <= 175 && rcCH6 == true && rcCH1 <= -10) {
-    // Left motion
-    pwmValue = map(rcCH3, 180, 250, 175, 105);
-    pwmValue1 = rcCH3;
-    analogWrite(motorPin, pwmValue);
-    analogWrite(motorPin2, pwmValue1);
-  } else if (rcCH3 >= 180 && rcCH6 == true){
-    // Forward motion
-    pwmValue = rcCH3;
-    pwmValue1 = rcCH3;
-    analogWrite(motorPin, pwmValue);
-    analogWrite(motorPin2, pwmValue1);
-  } else if(rcCH3 <= 175 && rcCH6 == true) {
-    // Backward motion
-    pwmValue = rcCH3;
-    pwmValue1 = rcCH3;
-    analogWrite(motorPin, pwmValue);
-    analogWrite(motorPin2, pwmValue1);
-  } else {
-    pwmValue = 0;
-    pwmValue1 = 0;
-    analogWrite(motorPin, pwmValue);
-    analogWrite(motorPin2, pwmValue1);
-  }
+  int pwmValue = 0;
+  int pwmValue1 = 0;
+
+  // Map the RC channel 3 value to the PWM range for motor 1
+  pwmValue = map(rcCH3, 105, 255, 105, 255);
+
+  // Calculate motor speeds based on steering adjustment
+  pwmValue = max(min(rcCH3 + rcCH1, 210), 145);
+  pwmValue1 = max(min(rcCH3 - rcCH1, 210), 145);
+
+  // Write the motor speeds to the motor pins
+  analogWrite(motorPin, pwmValue);
+  analogWrite(motorPin2, pwmValue1);
 }
 
+// Function definition for cmd_vel_callback
 void cmd_vel_callback(const geometry_msgs::Twist& cmd_vel_msg) {
   float linear_velocity = cmd_vel_msg.linear.x;
   float angular_velocity = cmd_vel_msg.angular.z;
 
-  // Calculate motor speeds based on linear and angular velocities
   int pwmValue = 0;
   int pwmValue1 = 0;
 
-  if (linear_velocity > 0.0) {
-    // Forward motion
-    pwmValue = map(linear_velocity + angular_velocity, 1.5, -1.5, 180, 210);
-    pwmValue1 = map(linear_velocity + angular_velocity, 1.5, -1.5, 180, 210);
-  } else if (linear_velocity < 0.0) {
-    // Backward motion
-    pwmValue = map(linear_velocity - angular_velocity, 1.5, -1.5, 175, 145);
-    pwmValue1 = map(linear_velocity - angular_velocity, 1.5, -1.5, 175, 145);
-  } else if (angular_velocity > 0.0) {
-    // Left motion
-    pwmValue = map(angular_velocity, -1.0, 1.0, 180, 210);
-    pwmValue1 = map(angular_velocity, -1.0, 1.0, 175, 145);
-  } else if (angular_velocity < 0.0) {
-    // Right motion
-    pwmValue = map(angular_velocity, 1.0, -1.0, 175, 145);
-    pwmValue1 = map(angular_velocity, 1.0, -1.0, 180, 210);
-  }
+  int pwmValue_linear = map(linear_velocity, -1.5, 1.5, 100, 250);
+  int pwmValue_angular = map(angular_velocity, -1.0, 1.0, -100, 100);
 
-  // Control each motor independently using pwmValue
+  pwmValue = pwmValue_linear + pwmValue_angular;
+  pwmValue1 = pwmValue_linear - pwmValue_angular;
+
+  pwmValue = constrain(pwmValue, 145, 210);
+  pwmValue1 = constrain(pwmValue1, 145, 210);
+
   analogWrite(motorPin, pwmValue);
   analogWrite(motorPin2, pwmValue1);
 }
