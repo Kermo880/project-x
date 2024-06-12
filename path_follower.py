@@ -84,8 +84,8 @@ class PathFollower:
                 linear_vel.linear.x = abs(linear_vel.linear.x)
             else:
                 linear_vel.linear.x = -abs(linear_vel.linear.x)
-            self.cmd_vel_publisher.publish(linear_vel)
-            print("Driving towards waypoint...")
+                self.cmd_vel_publisher.publish(linear_vel)
+                print("Driving towards waypoint...")
 
         print("Target heading:", target_heading)
         print("Current heading:", current_heading)
