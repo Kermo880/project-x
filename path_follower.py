@@ -1,16 +1,19 @@
-#!/usr/bin/env python3
+!/usr/bin/env python3
 
 import nav_msgs.msg
 import geometry_msgs.msg
 import rospy
 import math
 import numpy as np
+from std_msgs.msg import Bool
 
 class PathFollower:
     def __init__(self):
         self.path_subscriber = rospy.Subscriber("path", nav_msgs.msg.Path, self.path_callback)
         self.gps_subscriber = rospy.Subscriber("gps_enu", geometry_msgs.msg.PoseStamped, self.gps_callback)
         self.cmd_vel_publisher = rospy.Publisher("cmd_vel", geometry_msgs.msg.Twist, queue_size=1)
+        self.lidar_subscriber = rospy.Subscriber("lidar_pimp", Bool, self.lidar_callback)
+        self.lidar_status = False
         self.rate = rospy.Rate(10)  # Publish at 10 Hz
         self.current_waypoint = 0
         self.target_pose = None
@@ -30,6 +33,9 @@ class PathFollower:
         self.gps_y_prev = None
         self.path = None
 
+    def lidar_callback(self, msg):
+        self.lidar_status = msg.data
+
     def path_callback(self, path_msg):
         if self.path is None:
             self.path = path_msg
@@ -47,9 +53,6 @@ class PathFollower:
         print("Current waypoint:", self.current_waypoint)
         print("Target pose:", self.target_pose.pose.position.x, self.target_pose.pose.position.y)
         print("Current pose:", self.current_pose[0], self.current_pose[1])
-
-        linear_vel = geometry_msgs.msg.Twist()
-        angular_vel = geometry_msgs.msg.Twist()
 
         # Calculate the difference between current and target poses
         delta_x = self.target_pose.pose.position.x - self.current_pose[0]
@@ -71,30 +74,34 @@ class PathFollower:
         elif diff < -math.pi:
             diff += 2 * math.pi
 
-        if abs(diff) > 0.5745:
-            angular_vel = geometry_msgs.msg.Twist()
-            angular_vel.angular.z = 1.5 * diff
-            self.cmd_vel_publisher.publish(angular_vel)
-            print("Turning to face waypoint...")
+        linear_vel = float(1.5)
+        if delta_x > 0:
+            linear_vel = abs(linear_vel)
         else:
-            # Drive the robot towards the waypoint
-            linear_vel = geometry_msgs.msg.Twist()
-            linear_vel.linear.x = 1.0 * math.sqrt(delta_x**2 + delta_y**2)
-            if delta_x > 0:
-                linear_vel.linear.x = abs(linear_vel.linear.x)
-            else:
-                linear_vel.linear.x = -abs(linear_vel.linear.x)
-                self.cmd_vel_publisher.publish(linear_vel)
-                print("Driving towards waypoint...")
+            linear_vel = -abs(linear_vel)
+
+        angular_vel = diff
+
+        cmd_vel_msg = geometry_msgs.msg.Twist()
+
+        if self.lidar_status:
+            cmd_vel_msg.linear.x = 0.0
+            cmd_vel_msg.angular.z = 0.0
+        else:
+            cmd_vel_msg.linear.x = float(linear_vel)
+            cmd_vel_msg.angular.z = float(angular_vel)
+
+        self.cmd_vel_publisher.publish(cmd_vel_msg)
 
         print("Target heading:", target_heading)
         print("Current heading:", current_heading)
         print("Heading difference:", diff)
-        print("Linear velocity: ", linear_vel.linear.x)
-        print("Angular velocity: ", angular_vel.angular.z)
+        print("Linear velocity: ", linear_vel)
+        print("Angular velocity: ", angular_vel)
 
     def gps_callback(self, gps_msg):
         if self.gps_x_prev is None or self.gps_y_prev is None:
+            if self.gps_x_prev is None or self.gps_y_prev is None:
             self.gps_x_prev = gps_msg.pose.position.x
             self.gps_y_prev = gps_msg.pose.position.y
         print("GPS Coordinates:")
