@@ -11,10 +11,10 @@ import threading
 import queue
 import os
 
-record_path = os.path.join(os.getcwd(), "platsike.txt")
+record_path = os.path.join(os.getcwd(), "race.txt")
 
 gps_port = '/dev/ttyACM0'
-baudrate = 9600
+baudrate = 115200
 try:
   ser = serial.Serial(gps_port, baudrate, timeout=0.5)
 except serial.SerialException as e:
@@ -30,12 +30,14 @@ class GpsPublisher(object):
     self.publisher_raw = rospy.Publisher('gps_raw_data', NavSatFix, queue_size=10)
     self.publisher_enu = rospy.Publisher('gps_enu', PoseStamped, queue_size=10)
 
-    timer_period = 0.05
+    timer_period = 0.1
     self.timer_raw = rospy.Timer(rospy.Duration(timer_period), self.gps_callback)
 
     self.lat0 = 58.3428685594
     self.lon0 = 25.5692475361
-    self.alt0 = 91.357
+    self.alt0 = 71.357
+
+    self.prev_x, self.prev_y, self.prev_z = None, None, None
 
     self.data_queue = queue.Queue()
 
@@ -51,7 +53,7 @@ class GpsPublisher(object):
           self.queue.put(line)
     serial_reader = SerialReader(self.data_queue, ser)
     serial_reader.start()
-    
+
     self.status_fix_thread = threading.Thread(target=self.status_fix_loop)
     self.status_fix_thread.daemon = True
     self.status_fix_thread.start()
@@ -79,7 +81,6 @@ class GpsPublisher(object):
     while True:
       self.status_fix()
       print(f"Status Fix on the GPS")
-      time.sleep(1)
 
   def transform_to_enu(self, lat, lon, alt):
     x, y, z = pm.geodetic2enu(lat, lon, alt, self.lat0, self.lon0, self.alt0)
@@ -120,17 +121,19 @@ class GpsPublisher(object):
     msg.altitude = alt
     self.publisher_raw.publish(msg)
     x, y, z = self.transform_to_enu(lat, lon, alt)
-    enu_pose = PoseStamped()
-    enu_pose.header.stamp = rospy.Time.now()
-    enu_pose.header.frame_id = "enu"
-    enu_pose.pose.position.x = x
-    enu_pose.pose.position.y = y
-    enu_pose.pose.position.z = z
-    self.publisher_enu.publish(enu_pose)
+    if self.prev_x is None or abs(x - self.prev_x) > 0.00001 or abs(y - self.prev_y) > 0.00001:
+        self.prev_x, self.prev_y, self.prev_z = x, y, z
+        enu_pose = PoseStamped()
+        enu_pose.header.stamp = rospy.Time.now()
+        enu_pose.header.frame_id = "enu"
+        enu_pose.pose.position.x = x
+        enu_pose.pose.position.y = y
+        enu_pose.pose.position.z = z
+        self.publisher_enu.publish(enu_pose)
     #with open(record_path, 'a') as f:
       #f.write("{}, {}, {}\n".format(x, y, z))
 
-    #f = open("platsike.txt", "r")
+    #f = open("./race.txt", "r")
     #print(f.read())
 
 if __name__ == '__main__':
