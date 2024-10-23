@@ -36,6 +36,8 @@ class PathPublisher:
         path.header.stamp = rospy.Time.now()
         path.header.frame_id = "map"
         path.poses = self.waypoints
+        for i, pose in enumerate(path.poses):
+            pose.header.seq = i
         self.publisher.publish(path)
 
     def run(self):
@@ -44,7 +46,7 @@ class PathPublisher:
             self.rate.sleep()
 
 if __name__ == '__main__':
-    file_path = "platsike.txt"
+    file_path = "/home/jetson5/catkin_ws/race.txt"
     rospy.init_node('path_publisher')
     path_publisher = PathPublisher(file_path)
     path_publisher.run()
