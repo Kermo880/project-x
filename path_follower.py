@@ -1,123 +1,150 @@
-!/usr/bin/env python3
+#!/usr/bin/env python3
 
 import nav_msgs.msg
 import geometry_msgs.msg
 import rospy
 import math
 import numpy as np
-from std_msgs.msg import Bool
+import sensor_msgs.msg
+from tf.transformations import euler_from_quaternion
 
 class PathFollower:
     def __init__(self):
+        rospy.init_node("path_follower")
+
+        # Subscribers and Publisher
         self.path_subscriber = rospy.Subscriber("path", nav_msgs.msg.Path, self.path_callback)
         self.gps_subscriber = rospy.Subscriber("gps_enu", geometry_msgs.msg.PoseStamped, self.gps_callback)
-        self.cmd_vel_publisher = rospy.Publisher("cmd_vel", geometry_msgs.msg.Twist, queue_size=1)
-        self.lidar_subscriber = rospy.Subscriber("lidar_pimp", Bool, self.lidar_callback)
-        self.lidar_status = False
-        self.rate = rospy.Rate(10)  # Publish at 10 Hz
-        self.current_waypoint = 0
+        self.cmd_vel_publisher = rospy.Publisher("cmd_vel", geometry_msgs.msg.Twist, queue_size=10)
+        self.imu_subscriber = rospy.Subscriber("/mavros/imu/data", sensor_msgs.msg.Imu, self.imu_callback)
+
+        self.rate = rospy.Rate(10)
         self.target_pose = None
-
-        self.vehicle_state = np.array([
-            [0.0],
-            [0.0],
-            [0.0]
-        ])
-
-        self.bumper = 44.0
-        self.width = 88.0
-        self.wheelbase = 70.0
-        self.update_rate = 0.01
-
-        self.gps_x_prev = None
-        self.gps_y_prev = None
         self.path = None
+        self.waypoint_index = 0
+        self.current_yaw = 0.0
+        self.gps_position = None
 
-    def lidar_callback(self, msg):
-        self.lidar_status = msg.data
+        # PID parameters
+        self.kp = 1.0  # Proportional gain for steering
+        self.base_speed = 0.5  # Base speed for moving forward
+        self.heading_threshold = 10.0  # Threshold for heading adjustment in degrees
 
     def path_callback(self, path_msg):
-        if self.path is None:
+        if not self.path:  # Simplified check for path initialization
             self.path = path_msg
-        else:
-            self.path.poses.extend(path_msg.poses)
+            closest_index = self.find_closest_waypoint()
+            self.waypoint_index = closest_index
+            self.target_pose = self.path.poses[closest_index]
+            rospy.loginfo(f"Path Received: {len(self.path.poses)} waypoints, starting at index {self.waypoint_index}")
 
-        if self.current_waypoint >= len(self.path.poses):
-            self.current_waypoint = 0
+    def imu_callback(self, data):
+        orientation_q = data.orientation
+        orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+        _, _, self.current_yaw = euler_from_quaternion(orientation_list)
+        self.current_yaw = math.degrees(self.current_yaw)
 
-        self.target_pose = self.path.poses[self.current_waypoint]
+    def gps_callback(self, data):
+        # Store GPS position as a tuple for easier access later
+        self.gps_position = (data.pose.position.x, data.pose.position.y)
 
-        # Update the current pose based on the robot's current position
-        self.current_pose = self.vehicle_state[0:3]
+    def calculation(self):
+        if not all([self.path, self.target_pose, self.gps_position]):
+            rospy.logwarn("Waiting for path, target pose, or GPS position.")
+            return
+            
+        current_pose = self.gps_position
+        closest_index = self.find_closest_waypoint()
+        closest_pose = self.path.poses[closest_index].pose.position
 
-        print("Current waypoint:", self.current_waypoint)
-        print("Target pose:", self.target_pose.pose.position.x, self.target_pose.pose.position.y)
-        print("Current pose:", self.current_pose[0], self.current_pose[1])
+        next_index = (closest_index + 1) % len(self.path.poses)
+        next_pose = self.path.poses[next_index].pose.position
 
-        # Calculate the difference between current and target poses
-        delta_x = self.target_pose.pose.position.x - self.current_pose[0]
-        delta_y = self.target_pose.pose.position.y - self.current_pose[1]
+        # Calculate distance to the closest waypoint
+        distance_to_target = math.sqrt((closest_pose.x - current_pose[0])**2 + (closest_pose.y - current_pose[1])**2)
+        rospy.loginfo(f"Current Waypoint Index: {self.waypoint_index}, Distance to Target Waypoint: {distance_to_target}")
 
-        print("Delta x:", delta_x, "Delta y:", delta_y)
+        # Control signal calculation using Stanley control method
+        control_signal = self.stanley_control(current_pose[0], current_pose[1], closest_pose.x, closest_pose.y, next_pose.x, next_pose.y)
 
-        # Calculate angular velocity based on the difference in heading
-        target_x = self.target_pose.pose.position.x
-        target_y = self.target_pose.pose.position.y
-        current_x = self.current_pose[0]
-        current_y = self.current_pose[1]
+        # Calculate heading to the target waypoint and heading error
+        target_angle = math.degrees(math.atan2(next_pose.y - closest_pose.y, next_pose.x - closest_pose.x))
+        heading_error = self.calculate_heading_error(target_angle, self.current_yaw)
 
-        target_heading = math.atan2(target_y - current_y, target_x - current_x)
-        current_heading = math.atan2(self.current_pose[1] - current_y, self.current_pose[0] - current_x)
-        diff = (target_heading - current_heading) % (2 * math.pi)
-        if diff > math.pi:
-            diff -= 2 * math.pi
-        elif diff < -math.pi:
-            diff += 2 * math.pi
-
-        linear_vel = float(1.5)
-        if delta_x > 0:
-            linear_vel = abs(linear_vel)
-        else:
-            linear_vel = -abs(linear_vel)
-
-        angular_vel = diff
+        # Adjust motor speeds based on heading error and publish command velocity
+        angular_velocity = control_signal[0] if abs(heading_error) <= self.heading_threshold else max(min(self.kp * heading_error, 0.2), -0.2)
 
         cmd_vel_msg = geometry_msgs.msg.Twist()
-
-        if self.lidar_status:
-            cmd_vel_msg.linear.x = 0.0
-            cmd_vel_msg.angular.z = 0.0
-        else:
-            cmd_vel_msg.linear.x = float(linear_vel)
-            cmd_vel_msg.angular.z = float(angular_vel)
-
+        cmd_vel_msg.linear.x = self.base_speed
+        cmd_vel_msg.angular.z = angular_velocity
         self.cmd_vel_publisher.publish(cmd_vel_msg)
 
-        print("Target heading:", target_heading)
-        print("Current heading:", current_heading)
-        print("Heading difference:", diff)
-        print("Linear velocity: ", linear_vel)
-        print("Angular velocity: ", angular_vel)
+        # Update waypoint index if the vehicle has reached the current target
+        if distance_to_target < 1.0:
+            self.waypoint_index = (self.waypoint_index + 1) % len(self.path.poses)
+            self.target_pose = self.path.poses[self.waypoint_index]
+            rospy.loginfo(f"Next waypoint: {self.target_pose.pose.position.x}, {self.target_pose.pose.position.y}")
 
-    def gps_callback(self, gps_msg):
-        if self.gps_x_prev is None or self.gps_y_prev is None:
-            if self.gps_x_prev is None or self.gps_y_prev is None:
-            self.gps_x_prev = gps_msg.pose.position.x
-            self.gps_y_prev = gps_msg.pose.position.y
-        print("GPS Coordinates:")
-        print("X:", gps_msg.pose.position.x)
-        print("Y:", gps_msg.pose.position.y)
-        print("Orientation:", gps_msg.pose.orientation.z)
-        self.vehicle_state[0] = gps_msg.pose.position.x
-        self.vehicle_state[1] = gps_msg.pose.position.y
-        self.vehicle_state[2] = gps_msg.pose.orientation.z
-        self.current_pose = self.vehicle_state[0:3]
+    def find_closest_waypoint(self):
+        if not self.gps_position:
+            rospy.logwarn("GPS position not available.")
+            return 0
 
-    def control_loop(self):
+        min_distance = float('inf')
+        closest_waypoint_index = 0
+        current_pose = self.gps_position
+
+        for i, pose in enumerate(self.path.poses):
+            distance = math.sqrt((pose.pose.position.x - current_pose[0])**2 + (pose.pose.position.y - current_pose[1])**2)
+            if distance < min_distance:
+                min_distance = distance
+                closest_waypoint_index = i
+
+        return closest_waypoint_index
+
+    def calculate_heading_error(self, target_angle, current_yaw):
+        error = (target_angle - current_yaw + 180) % 360 - 180  # Normalize to [-180, 180]
+        return error
+
+    def reached_waypoint(self, target_pose):
+        current_pose = self.gps_position
+        distance_to_target = math.sqrt((target_pose.pose.position.x - current_pose[0])**2 +
+                                        (target_pose.pose.position.y - current_pose[1])**2)
+
+        return distance_to_target < 1.0  # Threshold for reaching the waypoint
+
+    def stanley_control(self, current_x, current_y, target_x, target_y, next_x, next_y):
+        dx = target_x - current_x
+        dy = target_y - current_y
+
+        abs_distance = np.sqrt(dx**2 + dy**2)
+
+        target_angle = math.atan2(dy, dx)
+
+        yaw_rad = math.radians(self.current_yaw)
+
+        crosstrack_error = np.sin(target_angle - yaw_rad) * abs_distance
+
+        dx_next = next_x - current_x
+        dy_next = next_y - current_y
+
+        target_angle_next = math.atan2(dy_next, dx_next)
+
+        k_s = 0.5  # Steering gain constant
+
+        heading_error = target_angle_next - yaw_rad
+
+        crosstrack_steering_error = np.arctan2(0.5 * crosstrack_error, k_s * self.base_speed)
+
+        steering_angle = crosstrack_steering_error + heading_error
+
+        return steering_angle,
+
+    def run(self):
         while not rospy.is_shutdown():
+            self.calculation()
             self.rate.sleep()
 
 if __name__ == "__main__":
-    rospy.init_node("path_follower")
-    follower = PathFollower()
-    follower.control_loop()
+    path_follower = PathFollower()
+    path_follower.run()
